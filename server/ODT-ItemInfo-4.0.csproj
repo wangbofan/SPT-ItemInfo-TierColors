@@ -1,0 +1,134 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+    <PropertyGroup>
+        <TargetFramework>net10.0</TargetFramework>
+        <RootNamespace>ItemInfo</RootNamespace>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <Nullable>enable</Nullable>
+        <OutputType>Library</OutputType>
+        <Version>0.0.1</Version>
+        <!-- The two lines below will set the output path for the binaries -->
+        <OutputPath>bin\$(Configuration)\$(ProjectName)\$(AssemblyName)\</OutputPath>
+        <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    </PropertyGroup>
+
+    <!--
+        SPT 4.1.x API. NuGet only publishes SPTarkov.* up to 4.1.2, while servers in the wild already ship 4.1.6,
+        so we compile against the assemblies of an actual server installation instead.
+        Override on the command line if your server lives elsewhere, e.g.:
+            dotnet build -c Release -p:SptServerDir="D:\SPT"
+    -->
+    <PropertyGroup>
+        <SptServerDir Condition="'$(SptServerDir)' == ''">E:\GAME\SPT_Runtime</SptServerDir>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <Reference Include="SPTarkov.Server.Core">
+            <HintPath>$(SptServerDir)\SPTarkov.Server.Core.dll</HintPath>
+            <Private>false</Private>
+        </Reference>
+        <Reference Include="SPTarkov.Common">
+            <HintPath>$(SptServerDir)\SPTarkov.Common.dll</HintPath>
+            <Private>false</Private>
+        </Reference>
+        <Reference Include="SPTarkov.DI">
+            <HintPath>$(SptServerDir)\SPTarkov.DI.dll</HintPath>
+            <Private>false</Private>
+        </Reference>
+        <Reference Include="SemanticVersioning">
+            <HintPath>$(SptServerDir)\SemanticVersioning.dll</HintPath>
+            <Private>false</Private>
+        </Reference>
+    </ItemGroup>
+
+    <PropertyGroup>
+        <SPTPath>$(SptServerDir)</SPTPath>
+    </PropertyGroup>
+
+    <Target Name="ForceBuild" BeforeTargets="CoreCompile" Inputs="" Outputs="" />
+
+    <Target Name="DebugCopy" AfterTargets="Build" Condition="'$(Configuration)' == 'Debug'">
+
+        <!-- Destination for debug builds -->
+        <PropertyGroup>
+            <DebugStaging>$(SPTPath)\user\mods\$(ProjectName)</DebugStaging>
+        </PropertyGroup>
+
+        <MakeDir Directories="$(DebugStaging)" />
+
+        <ItemGroup>
+            <!-- Copy all DLLs produced by the build -->
+            <DebugDlls Include="$(OutputPath)*.dll" />
+            
+            <!-- Copy all PDBs produced by the build -->
+            <DebugPdb Include="$(OutputPath)*.pdb" />
+
+            <!-- Copy all config files from the config folder -->
+            <ConfigFolder Include="$(OutputPath)config\**\*.*" />
+        </ItemGroup>
+
+        <Message Importance="high" Text="Debug build detected. Copying files to $(DebugStaging)" />
+
+        <!-- Copy DLLs -->
+        <Copy
+                SourceFiles="@(DebugDlls)"
+                DestinationFolder="$(DebugStaging)"
+                SkipUnchangedFiles="false"
+                ContinueOnError="false" />
+
+        <Copy
+                SourceFiles="@(DebugPdb)"
+                DestinationFolder="$(DebugStaging)"
+                SkipUnchangedFiles="false"
+                ContinueOnError="false" />
+
+        <!-- Copy config folder, preserving directory structure -->
+        <Copy
+                SourceFiles="@(ConfigFolder)"
+                DestinationFiles="@(ConfigFolder->'$(DebugStaging)\config\%(RecursiveDir)%(Filename)%(Extension)')"
+                SkipUnchangedFiles="true"
+                ContinueOnError="false" />
+
+    </Target>
+
+    <!-- Copy output to staging directory -->
+    <Target Name="StagingForge" AfterTargets="Build" Condition="'$(Configuration)' == 'Release'">
+
+        <!-- Build the full staging path -->
+        <PropertyGroup>
+            <StagingDir Condition="'$(StagingDir)' == ''">$(MSBuildThisFileDirectory)artifacts\$(ProjectName)\SPT\user\mods\$(ProjectName)</StagingDir>
+        </PropertyGroup>
+
+        <!-- Create directory if missing -->
+        <MakeDir Directories="$(StagingDir)" Condition="!Exists('$(StagingDir)')" />
+
+        <!-- Collect DLLs -->
+        <ItemGroup>
+            <!-- Copy all DLLs produced by the build -->
+            <DllFiles Include="$(OutputPath)*.dll" />
+
+            <!-- Copy all config files from the config folder -->
+            <ConfigFolder Include="$(OutputPath)config\**\*.*" />
+        </ItemGroup>
+
+        <Message Importance="high" Text="Copying DLLs to staging: $(StagingDir)" />
+
+        <!-- Copy DLLs -->
+        <Copy
+                SourceFiles="@(DllFiles)"
+                DestinationFolder="$(StagingDir)"
+                SkipUnchangedFiles="true"
+                ContinueOnError="false" />
+
+        <!-- Copy config folder, preserving directory structure -->
+        <Copy
+                SourceFiles="@(ConfigFolder)"
+                DestinationFiles="@(ConfigFolder->'$(StagingDir)\config\%(RecursiveDir)%(Filename)%(Extension)')"
+                SkipUnchangedFiles="true"
+                ContinueOnError="false" />
+
+        <Message Importance="high" Text="Staging complete." />
+
+    </Target>
+    
+</Project>
