@@ -35,7 +35,7 @@ public record ModMetadata : IModMetadata
     public string Name { get; init; } = "ItemInfo";
     public string Author { get; init; } = "ODT";
     public List<string>? Contributors { get; init; }
-    public SemanticVersioning.Version Version { get; init; } = new("2.0.15");
+    public SemanticVersioning.Version Version { get; init; } = new("2.3.2");
     public SemanticVersioning.Range SptVersion { get; init; } = new("~4.1.0");
     public bool HasPrepatcher { get; init; }
     public List<string>? Incompatibilities { get; init; }
@@ -80,7 +80,28 @@ public class ItemInfo(
 	public required List<string> BsgBlacklist { get; set; }
 	public string PathToMod { get; set; }
 	public Dictionary<MongoId, ModItemDescription> ItemDescription { get; set; } = new();
-	
+
+	/// <summary>
+	/// tpl -> 档位（1-5）映射，供客户端 mod 通过 /iteminfo/tiers 拉取。
+	/// 客户端拿不到跳蚤均价，所以档位判定必须由服务端做。
+	/// </summary>
+	public static Dictionary<string, int> ExportTiers { get; } = new();
+
+	/// <summary>
+	/// 档位 -> 本地化名称（COMMON/RARE/EPIC/LEGENDARY/MYTHIC）。
+	/// </summary>
+	public static Dictionary<string, string> ExportTierNames { get; } = new();
+
+	/// <summary>
+	/// 档位 -> 十六进制颜色。
+	/// </summary>
+	public static Dictionary<string, string> ExportTierHex { get; } = new();
+
+	/// <summary>
+	/// 导出表的版本号，供客户端判断是否需要刷新缓存。
+	/// </summary>
+	public static string ExportVersion { get; set; } = "2.3.2";
+
     public Task OnLoadAsync(CancellationToken cancellationToken)
     {
 	    PathToMod = modHelper.GetAbsolutePathToModFolder(Assembly.GetExecutingAssembly());
@@ -128,6 +149,10 @@ public class ItemInfo(
 	    i18n = Translation.Language[UserLocale];
 	    Localization = localeService.GetLocaleDb(UserLocale);
 	    BsgBlacklist = ModBsgBlackList.BsgBlackList;
+
+	    // 档位导出表要等 i18n 就绪后才能取名（tiers.json 的键 -> 本地化档位名）
+	    Utils.Tiers = Tiers;
+	    BuildTierExportTables();
 	    
         // Pass all the services and vars to Utils
         Utils.Initialize(templates,
@@ -165,6 +190,61 @@ public class ItemInfo(
         return Task.CompletedTask;
     }
 
+	/// <summary>
+	/// 把 tiers / tiers_hex / translations 里的档位信息整理成客户端可直接消费的三张表。
+	/// </summary>
+	private void BuildTierExportTables()
+	{
+		ExportTierNames.Clear();
+		ExportTierHex.Clear();
+
+		foreach (string key in RarityColors.TierKeys)
+		{
+			string name = key;
+
+			if (i18n != null && i18n.TryGetValue(key, out string? localized) && !string.IsNullOrEmpty(localized))
+				name = localized;
+
+			ExportTierNames[key] = name;
+			ExportTierHex[key] = RarityColors.Text(TiersHex, Tiers, key);
+		}
+	}
+
+	/// <summary>
+	/// 把档位导出表写成 JSON 文件，客户端 mod 读这个文件即可（比走 HTTP 路由稳）。
+	/// </summary>
+	private void WriteTierExportFile()
+	{
+		try
+		{
+			Dictionary<string, object> payload = new()
+			{
+				["version"] = ExportVersion,
+				["generatedAt"] = DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture),
+				["names"] = new Dictionary<string, string>(ExportTierNames),
+				["colors"] = new Dictionary<string, string>(ExportTierHex),
+				["tiers"] = new Dictionary<string, int>(ExportTiers)
+			};
+
+			string json = jsonUtil.Serialize(payload);
+
+			if (string.IsNullOrWhiteSpace(json))
+			{
+				logger.Warning("[ItemInfo] Failed to serialize tier export file.");
+				return;
+			}
+
+			string exportPath = System.IO.Path.Combine(PathToMod, "tiers_export.json");
+			ItemInfoTierRouter.CachePath = exportPath;
+			File.WriteAllText(exportPath, json);
+			logger.Info("[ItemInfo] Wrote tier export file with " + ExportTiers.Count + " entries.");
+		}
+		catch (Exception e)
+		{
+			logger.Warning("[ItemInfo] Failed to write tier export file: " + e.Message);
+		}
+	}
+
     private void ItemInfoMain()
     {
 	    TranslationDebug();
@@ -176,6 +256,8 @@ public class ItemInfo(
 	    ItemHandling();
 	    stopwatch.Stop();
 	    logger.Info("[ItemInfo] Completed processing " + Items.Count +" items in " + stopwatch.ElapsedMilliseconds + " ms.");
+	    logger.Info("[ItemInfo] Exported tiers for " + ExportTiers.Count + " items.");
+	    WriteTierExportFile();
     }
 
     private void TranslationDebug()
@@ -281,6 +363,50 @@ public class ItemInfo(
 	    }
     }
 
+	/// <summary>
+	/// 把等效价值换算成 1-5 档。阈值来自 tiers.json 的 TIER_1_MAX..TIER_4_MAX。
+	/// </summary>
+	private int ComputeTier(double equivalentValue)
+	{
+		double t1 = ParseThreshold("TIER_1_MAX", 10000d);
+		double t2 = ParseThreshold("TIER_2_MAX", 35000d);
+		double t3 = ParseThreshold("TIER_3_MAX", 100000d);
+		double t4 = ParseThreshold("TIER_4_MAX", 300000d);
+
+		if (equivalentValue <= t1)
+			return 1;
+		if (equivalentValue <= t2)
+			return 2;
+		if (equivalentValue <= t3)
+			return 3;
+		if (equivalentValue <= t4)
+			return 4;
+		return 5;
+	}
+
+	private double ParseThreshold(string key, double fallback)
+	{
+		if (Tiers is not null &&
+		    Tiers.TryGetValue(key, out string? raw) &&
+		    double.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out double value) &&
+		    value > 0)
+			return value;
+
+		return fallback;
+	}
+
+	/// <summary>
+	/// 档位数字 -> tiers.json / translations.json 使用的键名。
+	/// </summary>
+	internal static string TierKeyOf(int tier) => tier switch
+	{
+		<= 1 => "COMMON",
+		2 => "RARE",
+		3 => "EPIC",
+		4 => "LEGENDARY",
+		_ => "MYTHIC"
+	};
+
     private void ItemHandling()
     {
 	    int a = 0;
@@ -291,6 +417,8 @@ public class ItemInfo(
 	    StringBuilder tiersHexCode = new StringBuilder();
 	    StringBuilder addToName = new StringBuilder();
 	    StringBuilder addToShortName = new StringBuilder();
+	    // 导出给客户端 mod 的 tpl -> 档位 表（客户端拿不到跳蚤价，只能服务端下发）
+	    ExportTiers.Clear();
 	    
 	    foreach (KeyValuePair<MongoId, TemplateItem> kvp in Items)
 	    {
@@ -329,13 +457,9 @@ public class ItemInfo(
 		    
 		    double traderPrice = Math.Round((double)price);
 		    List<Utils.ResolvedBarter> itemBarters = Utils.BarterResolver(itemId);
-		    ValueTuple<List<double>, string, List<int>> barterInfo = Utils.BarterInfoGenerator(itemBarters, UserLocale);
-		    List<int> rarityArray = barterInfo.Item3;
-		    int itemRarity = rarityArray.Min();
-		    int slotDensity = Utils.GetItemSlotDensity(itemProperties);
-		    bool isBanned = false;
+		    ValueTuple<List<double>, string, List<Utils.ResolvedBarter>> barterInfo = Utils.BarterInfoGenerator(itemBarters, UserLocale);
+		    int itemRarity = 1;
 		    
-		    string fleaPriceString = fleaPrice.ToString(CultureInfo.CurrentCulture);
 		    string itemQuestInfo = Utils.QuestInfoGenerator(itemId, UserLocale);
 
 		    itemBestTraderName.Append(itemBestVendor.Item2);
@@ -358,66 +482,36 @@ public class ItemInfo(
 		    a += 1;
 #endif
 
-		    // UseBsgStaticFleaBanList
-		    if (Config.UseBsgStaticFleaBanList.Enabled)
-		    {
-			    if (BsgBlacklist.Contains(itemId))
-					isBanned = true;
-		    }
-		    else
-		    {
-			    isBanned = !itemProperties.CanSellOnRagfair ?? false;
-		    }
-
-		    // Rarity handling
-		    if (isBanned)
-		    {
-			    fleaPriceString = i18n["BANNED"];
-				itemRarity = 7;
-		    }
-
-		    if ((itemHelper.IsOfBaseclass(itemId, BaseClasses.MOD) ||
-		         itemHelper.IsOfBaseclass(itemId, BaseClasses.ARMOR) ||
-		         itemHelper.IsOfBaseclass(itemId, BaseClasses.AMMO) ||
-		         itemHelper.IsOfBaseclass(itemId, BaseClasses.ARMOR_PLATE) ||
-		         itemHelper.IsOfBaseclass(itemId, BaseClasses.VEST) ||
-		         itemHelper.IsOfBaseclass(itemId, BaseClasses.WEAPON) ||
-		         templateItem.Parent == "57bef4c42459772e8d35a53b") && // strictly ARMORED_EQUIPMENT
-		         string.IsNullOrEmpty(barterInfo.Item2) &&
-		         !isBanned)
-			    itemRarity = 6;
-
-		    if (itemQuestInfo.Contains('↺') &&
-		        !itemQuestInfo.Contains('∈') &&
-		        rarityArray.Count < 4)
-			    itemRarity += 2;
-
-		    if (templateItem.Parent == "543be5cb4bdc2deb348b4568")
+		    // Rarity handling — 价值五档（灰蓝紫橙红）
+		    // 价值 V = 单价 × 堆叠上限；系数按商人最低忠诚等级；商人不卖按 1.00。
+		    if (templateItem.Parent == "543be5cb4bdc2deb348b4568") // 弹药箱：按箱内弹种总价
 		    {
 			    IEnumerable<StackSlot>? stackSlots = itemProperties.StackSlots;
 			    List<StackSlot>? stackSlotsList = stackSlots?.ToList();
 
-			    if (stackSlotsList is not null)
+			    if (stackSlotsList is not null &&
+			        stackSlotsList.Count > 0)
 			    {
 				    double? count = stackSlotsList[0].MaxCount;
 				    MongoId? ammo = stackSlotsList[0].Properties?.Filters?.ToList()[0].Filter?.ToList()[0];
 				    double? value = Utils.GetItemBestTrader(ammo!).price;
-				    
+
 				    if (value is not null &&
 				        count is not null)
-						traderPrice = (double)(value * count);
+					    traderPrice = (double)(value * count);
 				    else
 					    traderPrice = 0;
-				    
-				    if (itemRarity != 7)
-					    fleaPriceString = "";
 			    }
 		    }
 
-		    if (isBanned &&
-		        rarityArray.Min() == 0)
-			    itemRarity = 9;
-			    
+		    int lowestLoyaltyLevel = Utils.GetLowestLoyaltyLevel(itemId);
+		    double unitPrice = Utils.GetUnitPrice(itemId);
+		    double stackSize = Math.Max(1, itemProperties.StackMaxSize ?? 1);
+		    double totalValue = unitPrice * stackSize;
+		    double equivalentValue = totalValue * Utils.GetLoyaltyMultiplier(lowestLoyaltyLevel);
+
+		    itemRarity = ComputeTier(equivalentValue);
+
 		    // BulletStatsInName
 		    if (Config.ModBulletStatsInName.Enabled)
 		    {
@@ -625,68 +719,12 @@ public class ItemInfo(
 			    }
 		    }
 
-		    if (Config.ModMarkValuableItems.Enabled)
-		    {
-			    if (Config.ModSoftcoreAmmoStackMultiFix.Enabled &&
-			        itemHelper.IsOfBaseclass(itemId, BaseClasses.AMMO) &&
-			        itemProperties.StackMaxSize > 1)
-				    slotDensity *= 10;
-
-			    double itemValue = traderPrice / slotDensity;
-
-			    double fleaValue;
-
-			    if (isBanned)
-			    {
-				    fleaValue = Utils.GetFleaPrice(itemId) / slotDensity ?? 0;
-
-				    if (Config.ModMarkValuableItems.AlwaysMarkBannedItems)
-					    fleaValue = Config.ModMarkValuableItems.FleaSlotValueThresholdBest + 1;
-			    }
-			    else
-			    {
-				    fleaValue = fleaPrice / slotDensity;
-			    }
-
-			    if (templateItem.Parent != "5795f317245977243854e041")
-			    {
-				    bool useAlt = UserLocale is "jp" or "kr" || Config.ModMarkValuableItems.UseAltValueMark;
-				    string mark = "";
-
-				    if (itemValue > Config.ModMarkValuableItems.TraderSlotValueThresholdBest ||
-				        fleaValue > Config.ModMarkValuableItems.FleaSlotValueThresholdBest)
-				    {
-					    mark = useAlt
-						    ? Config.ModMarkValuableItems.AltBestValueMark
-						    : Config.ModMarkValuableItems.BestValueMark;
-				    }
-				    else if (itemValue > Config.ModMarkValuableItems.TraderSlotValueThresholdGood ||
-				             fleaValue > Config.ModMarkValuableItems.FleaSlotValueThresholdGood)
-				    {
-					    mark = useAlt
-						    ? Config.ModMarkValuableItems.AltGoodValueMark
-						    : Config.ModMarkValuableItems.GoodValueMark;
-				    }
-
-				    if (!string.IsNullOrEmpty(mark))
-				    {
-					    if (Config.ModMarkValuableItems.AddToShortName)
-						    Utils.AddToShortName(itemId, mark + " ", "prepend");
-
-					    if (Config.ModMarkValuableItems.AddToName)
-						    Utils.AddToName(itemId, " " + mark, "append");
-				    }
-			    }
-		    }
-
 		    if (Config.ModPriceInfo.Enabled)
 			    ItemDescription[itemId].PriceString = (Config.ModPriceInfo.AddFleaPrice
 				                                          ? i18n["Fleaprice"] +
 				                                            ": " +
-				                                            (fleaPriceString == i18n["BANNED"]
-					                                            ? i18n["BANNED"]
-					                                            : Utils.FormatPrice(fleaPrice) +
-					                                              (fleaPrice > 0 ? "₽" : "")) +
+				                                            Utils.FormatPrice(fleaPrice) +
+				                                            (fleaPrice > 0 ? "₽" : "") +
 				                                            " | "
 				                                          : "") +
 			                                          (Config.ModPriceInfo.AddItemValue
@@ -757,7 +795,7 @@ public class ItemInfo(
 			    }
 		    }
 		    
-		    // Rarity recolor handling
+		    // Rarity recolor handling — 五档配色（灰蓝紫橙红）
 		    if (Config.ModRarityRecolor.Enabled &&
 		        !Config.RarityRecolorBlacklist.Contains(templateItem.Parent))
 		    {
@@ -770,123 +808,28 @@ public class ItemInfo(
 				    foreach (KeyValuePair<string, int> customItem in Config.ModRarityRecolor.CustomRarity)
 				    {
 					    if (customItem.Key == itemId)
-						    itemRarity = customItem.Value;
-				    }
-				    
-				    string tier;
-				    
-				    switch (itemRarity)
-				    {
-					    case 7:
-						    tier = i18n["OVERPOWERED"];
-						    itemProperties.BackgroundColor = RarityColors.Background(Tiers, TiersHex, "OVERPOWERED");
-						    tiersHexCode.Clear().Append(RarityColors.Text(TiersHex, Tiers, "OVERPOWERED"));
-						    break;
-					    case 1:
-						    tier = i18n["COMMON"];
-						    itemProperties.BackgroundColor = RarityColors.Background(Tiers, TiersHex, "COMMON");
-						    tiersHexCode.Clear().Append(RarityColors.Text(TiersHex, Tiers, "COMMON"));
-						    break;
-					    case 2:
-						    tier = i18n["RARE"];
-						    itemProperties.BackgroundColor = RarityColors.Background(Tiers, TiersHex, "RARE");
-						    tiersHexCode.Clear().Append(RarityColors.Text(TiersHex, Tiers, "RARE"));
-						    break;
-					    case 3:
-						    tier = i18n["EPIC"];
-						    itemProperties.BackgroundColor = RarityColors.Background(Tiers, TiersHex, "EPIC");
-						    tiersHexCode.Clear().Append(RarityColors.Text(TiersHex, Tiers, "EPIC"));
-						    break;
-					    case 4:
-						    tier = i18n["LEGENDARY"];
-						    itemProperties.BackgroundColor = RarityColors.Background(Tiers, TiersHex, "LEGENDARY");
-						    tiersHexCode.Clear().Append(RarityColors.Text(TiersHex, Tiers, "LEGENDARY"));
-						    break;
-					    case 5:
-						    tier = i18n["UBER"];
-						    itemProperties.BackgroundColor = RarityColors.Background(Tiers, TiersHex, "UBER");
-						    tiersHexCode.Clear().Append(RarityColors.Text(TiersHex, Tiers, "UBER"));
-						    break;
-					    case 6:
-						    tier = i18n["UNOBTAINIUM"];
-						    itemProperties.BackgroundColor = RarityColors.Background(Tiers, TiersHex, "UNOBTAINIUM");
-						    tiersHexCode.Clear().Append(RarityColors.Text(TiersHex, Tiers, "UNOBTAINIUM"));
-						    break;
-					    case 8:
-						    tier = i18n["CUSTOM"];
-						    itemProperties.BackgroundColor = RarityColors.Background(Tiers, TiersHex, "CUSTOM");
-						    tiersHexCode.Clear().Append(RarityColors.Text(TiersHex, Tiers, "CUSTOM"));
-						    break;
-					    default: // itemRarity >= 9 or itemRarity == 0 with fallback disabled
-						    tier = i18n["CUSTOM2"];
-						    itemProperties.BackgroundColor = RarityColors.Background(Tiers, TiersHex, "CUSTOM2");
-						    tiersHexCode.Clear().Append(RarityColors.Text(TiersHex, Tiers, "CUSTOM2"));
-						    break;
+						    itemRarity = Math.Clamp(customItem.Value, 1, 5); // 手工表统一收敛到 1-5
 				    }
 
-				    // Rarity recolor fallback handling
-				    if (Config.ModRarityRecolor.FallbackValueBasedRecolor &&
-				        itemRarity == 0)
-				    {
-					    double itemValue = itemInHandbook.Price ?? 0;
-					    int itemSlots = itemProperties.Width * itemProperties.Height ?? 0;
+				    string tier = TierKeyOf(itemRarity);
 
-					    if (itemSlots > 1)
-						    itemValue = Math.Round(itemValue / itemSlots);
+				    itemProperties.BackgroundColor = RarityColors.Background(Tiers, TiersHex, tier);
+				    tiersHexCode.Clear().Append(RarityColors.Text(TiersHex, Tiers, tier));
 
-					    if (templateItem.Parent == "543be5cb4bdc2deb348b4568")
-						    itemValue = traderPrice;
-
-					    switch (itemValue)
-					    {
-						    case var _ when itemValue < int.Parse(Tiers["COMMON_VALUE_FALLBACK"]):
-							    tier = i18n["COMMON"];
-							    itemProperties.BackgroundColor = RarityColors.Background(Tiers, TiersHex, "COMMON");
-							    tiersHexCode.Clear().Append(RarityColors.Text(TiersHex, Tiers, "COMMON"));
-							    break;
-						    case var _ when itemValue < int.Parse(Tiers["RARE_VALUE_FALLBACK"]):
-							    tier = i18n["RARE"];
-							    itemProperties.BackgroundColor = RarityColors.Background(Tiers, TiersHex, "RARE");
-							    tiersHexCode.Clear().Append(RarityColors.Text(TiersHex, Tiers, "RARE"));
-							    break;
-						    case var _ when itemValue < int.Parse(Tiers["EPIC_VALUE_FALLBACK"]):
-							    tier = i18n["EPIC"];
-							    itemProperties.BackgroundColor = RarityColors.Background(Tiers, TiersHex, "EPIC");
-							    tiersHexCode.Clear().Append(RarityColors.Text(TiersHex, Tiers, "EPIC"));
-							    break;
-						    case var _ when itemValue < int.Parse(Tiers["LEGENDARY_VALUE_FALLBACK"]):
-							    tier = i18n["LEGENDARY"];
-							    itemProperties.BackgroundColor = RarityColors.Background(Tiers, TiersHex, "LEGENDARY");
-							    tiersHexCode.Clear().Append(RarityColors.Text(TiersHex, Tiers, "LEGENDARY"));
-							    break;
-						    case var _ when itemValue < int.Parse(Tiers["UBER_VALUE_FALLBACK"]):
-							    tier = i18n["UBER"];
-							    itemProperties.BackgroundColor = RarityColors.Background(Tiers, TiersHex, "UBER");
-							    tiersHexCode.Clear().Append(RarityColors.Text(TiersHex, Tiers, "UBER"));
-							    break;
-						    default:
-							    tier = i18n["UNOBTAINIUM"];
-							    itemProperties.BackgroundColor = RarityColors.Background(Tiers, TiersHex, "UNOBTAINIUM");
-							    tiersHexCode.Clear().Append(RarityColors.Text(TiersHex, Tiers, "UNOBTAINIUM"));
-							    break;
-					    }
-				    }
-				    
 				    if (Config.ModRarityRecolor.AddColorToName)
-						Utils.AddColorToName(itemId, tiersHexCode.ToString(), UserLocale);
-				    
+					    Utils.AddColorToName(itemId, tiersHexCode.ToString(), UserLocale);
+
 				    Utils.AddColorToShortName(itemId, RarityColors.Text(TiersHex, Tiers, "COMMON"), UserLocale);
 
-				    if (Config.ModRarityRecolor.AddTierNameToPricesInfo &&
-				        !string.IsNullOrEmpty(tier))
-				    {
+				    ExportTiers[itemId] = itemRarity;
+
+				    if (Config.ModRarityRecolor.AddTierNameToPricesInfo)
 					    ItemDescription[itemId].PriceString += " | " +
 					                                           "<color=" +
 					                                           tiersHexCode +
 					                                           ">" +
-					                                           tier +
+					                                           i18n[tier] +
 					                                           "</color>\n\n";
-				    }
 			    }
 		    }
 	    }
@@ -960,6 +903,63 @@ public class ItemInfo(
 		    Utils.AddToDescription(itemId, descriptionString.ToString(), "prepend");
 	    }
     }
+}
+
+/// <summary>
+/// `/iteminfo/tiers` 的响应体：客户端 mod 用它把 tpl 映射成 1-5 档。
+/// 客户端拿不到跳蚤均价，所以档位判定必须由服务端在这里做完。
+/// </summary>
+public class TierExportResponse
+{
+    public string Version { get; set; } = "2.3.2";
+    public string GeneratedAt { get; set; } = "";
+    public Dictionary<string, string> Names { get; set; } = new();
+    public Dictionary<string, string> Colors { get; set; } = new();
+    public Dictionary<string, int> Tiers { get; set; } = new();
+}
+
+[Injectable]
+public class ItemInfoTierRouter(JsonUtil jsonUtil) : StaticRouter(
+    jsonUtil,
+    new RouteAction[]
+    {
+        new RouteAction<EmptyRequestData>(
+        "/iteminfo/tiers",
+        async (string url, EmptyRequestData info, MongoId sessionId, string? output, CancellationToken cancellationToken) =>
+        {
+            TierExportResponse response = new()
+            {
+                GeneratedAt = DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture),
+                Names = new Dictionary<string, string>(ItemInfo.ExportTierNames),
+                Colors = new Dictionary<string, string>(ItemInfo.ExportTierHex),
+                Tiers = new Dictionary<string, int>(ItemInfo.ExportTiers)
+            };
+
+            return jsonUtil.Serialize(response) ?? "{}";
+        }
+        ),
+        // 兼容个别客户端的缓存习惯：带上查询串也要能命中
+        new RouteAction<EmptyRequestData>(
+        "/iteminfo/tiers.json",
+        async (string url, EmptyRequestData info, MongoId sessionId, string? output, CancellationToken cancellationToken) =>
+        {
+            TierExportResponse response = new()
+            {
+                GeneratedAt = DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture),
+                Names = new Dictionary<string, string>(ItemInfo.ExportTierNames),
+                Colors = new Dictionary<string, string>(ItemInfo.ExportTierHex),
+                Tiers = new Dictionary<string, int>(ItemInfo.ExportTiers)
+            };
+
+            return jsonUtil.Serialize(response) ?? "{}";
+        }
+        )
+    })
+{
+    /// <summary>
+    /// 客户端读不到 HTTP 时可以退回去读这个文件（写在 mod 目录下的 tiers_export.json）。
+    /// </summary>
+    public static string? CachePath { get; set; }
 }
 
 public class ModTiers : Dictionary<string, string>;

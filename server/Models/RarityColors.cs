@@ -30,8 +30,7 @@ public static class RarityColors
     /// </summary>
     public static readonly string[] TierKeys =
     {
-        "COMMON", "RARE", "EPIC", "LEGENDARY", "UBER",
-        "UNOBTAINIUM", "OVERPOWERED", "CUSTOM", "CUSTOM2", "UNKNOWN"
+        "COMMON", "RARE", "EPIC", "LEGENDARY", "MYTHIC"
     };
 
     /// <summary>
@@ -41,17 +40,17 @@ public static class RarityColors
     private static readonly Dictionary<string, string> HexByColor = new(StringComparer.OrdinalIgnoreCase)
     {
         ["default"] = "#FFFFFF",
-        ["blue"] = "#4A90D9",
+        ["blue"] = "#2694DA",
         ["green"] = "#4CD07D",
         ["grey"] = "#8C8C8C",
         ["yellow"] = "#E8D24A",
-        ["orange"] = "#E8913C",
+        ["orange"] = "#FFA726",
         ["red"] = "#D94A4A",
         ["violet"] = "#9F5ACF",
         ["black"] = "#3C3C3C",
         ["tracerYellow"] = "#FFE633",
         ["tracerGreen"] = "#66FF66",
-        ["tracerRed"] = "#FF6666"
+        ["tracerRed"] = "#FF3B3B"
     };
 
     private static readonly HashSet<string> WarnedKeys = new(StringComparer.OrdinalIgnoreCase);

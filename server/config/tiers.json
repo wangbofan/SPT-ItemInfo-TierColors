@@ -1,0 +1,15 @@
+{
+  "COMMON": "grey",
+  "RARE": "blue",
+  "EPIC": "violet",
+  "LEGENDARY": "orange",
+  "MYTHIC": "tracerRed",
+  "TIER_1_MAX": "10000",
+  "TIER_2_MAX": "35000",
+  "TIER_3_MAX": "100000",
+  "TIER_4_MAX": "300000",
+  "LOYALTY_1": "1.00",
+  "LOYALTY_2": "1.15",
+  "LOYALTY_3": "1.30",
+  "LOYALTY_4": "1.45"
+}

@@ -48,8 +48,6 @@ public class ModConfig
 		public bool AddColorToName { get; set; }
 		[JsonPropertyName("addTierNameToPricesInfo")]
 		public bool AddTierNameToPricesInfo { get; set; }
-		[JsonPropertyName("fallbackValueBasedRecolor")]
-		public bool FallbackValueBasedRecolor { get; set; }
 		[JsonPropertyName("bypassAmmoRecolor")]
 		public bool BypassAmmoRecolor { get; set; }
 		[JsonPropertyName("bypassKeysRecolor")]
@@ -157,38 +155,6 @@ public class ModConfig
 		public bool AddFleaPrice { get; set; }
 		[JsonPropertyName("addItemValue")]
 		public bool AddItemValue {get; set;}
-	}
-	
-	[JsonPropertyName("MarkValuableItems")]
-	public MarkValuableItems ModMarkValuableItems { get; set; } = new();
-	public class MarkValuableItems
-	{
-		[JsonPropertyName("enabled")]
-		public bool Enabled { get; set; }
-		[JsonPropertyName("addToName")]
-		public bool AddToName {get; set;}
-		[JsonPropertyName("addToShortName")]
-		public bool AddToShortName {get; set;}
-		[JsonPropertyName("useAltValueMark")]
-		public bool UseAltValueMark {get; set;}
-		[JsonPropertyName("alwaysMarkBannedItems")]
-		public bool AlwaysMarkBannedItems {get; set;}
-		[JsonPropertyName("BestValueMark")]
-		public string BestValueMark {get; set;}
-		[JsonPropertyName("GoodValueMark")]
-		public string GoodValueMark {get; set;}
-		[JsonPropertyName("AltBestValueMark")]
-		public string AltBestValueMark {get; set;}
-		[JsonPropertyName("AltGoodValueMark")]
-		public string AltGoodValueMark {get; set;}
-		[JsonPropertyName("traderSlotValueThresholdBest")]
-		public double TraderSlotValueThresholdBest {get; set;}
-		[JsonPropertyName("traderSlotValueThresholdGood")]
-		public double TraderSlotValueThresholdGood {get; set;}
-		[JsonPropertyName("fleaSlotValueThresholdBest")]
-		public double FleaSlotValueThresholdBest {get; set;}
-		[JsonPropertyName("fleaSlotValueThresholdGood")]
-		public double FleaSlotValueThresholdGood {get; set;}
 	}
 	
 	[JsonPropertyName("SoftcoreAmmoStackMultiFix")]

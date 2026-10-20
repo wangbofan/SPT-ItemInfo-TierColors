@@ -170,11 +170,6 @@ public static class Utils
 		    price.ToString(CultureInfo.GetCultureInfo("en-US"));
     }
 
-    public static int GetItemSlotDensity(TemplateItemProperties properties)
-    {
-	    return properties.Width * properties.Height / properties.StackMaxSize ?? -1;
-    }
-
     public static HandbookItem? GetItemInHandbook(string itemId)
     {
 	    foreach (var handbookItem in _handbookItems)
@@ -194,6 +189,92 @@ public static class Utils
 	    double? result = handbookItem?.Price * bestTrader.Multi;
 
 	    return new ValueTuple<double?, string, string>(result, bestTrader.name, handbookItem?.ParentId ?? "GetItemBestTrader() handbookItem");
+    }
+
+    /// <summary>
+    /// 该物品在商人处能被买到的**最低**忠诚等级（LL）。兑换与直购一视同仁，只看等级。
+    /// 没有任何商人出售（或只被黑名单商人出售）时返回 0，表示"商人不卖"。
+    /// </summary>
+    public static int GetLowestLoyaltyLevel(string itemId)
+    {
+	    int lowest = 0;
+
+	    try
+	    {
+		    MongoId itemMongoId = itemId;
+
+		    foreach (KeyValuePair<MongoId, Trader> kvp in _traders)
+		    {
+			    Trader trader = kvp.Value;
+			    TraderAssort? assort = trader.Assort;
+
+			    if (assort?.LoyalLevelItems is null ||
+			        assort.Items is null ||
+			        assort.Items.Count == 0 ||
+			        _config.BlacklistedTradersFromRarityCalc.Contains(kvp.Key))
+				    continue;
+
+			    foreach (Item item in assort.Items)
+			    {
+				    if (item.Template != itemMongoId)
+					    continue;
+
+				    if (!assort.LoyalLevelItems.TryGetValue(item.Id, out int level) ||
+				        level <= 0)
+					    continue;
+
+				    if (lowest == 0 || level < lowest)
+					    lowest = level;
+			    }
+		    }
+	    }
+	    catch (Exception ex)
+	    {
+		    _logger.Warning("[ItemInfo] GetLowestLoyaltyLevel() failed for item \"" +
+		                    GetItemName(itemId) +
+		                    "\" because of another mod. Continuing safely. Exception: " + ex);
+	    }
+
+	    return lowest;
+    }
+
+    /// <summary>
+    /// 忠诚等级系数：数值越低（越好买）系数越小，等效价值越接近原价。
+    /// 取值来自 config/tiers.json 的 LOYALTY_1..4，缺省回落到 1.00 / 1.15 / 1.30 / 1.45。
+    /// </summary>
+    public static double GetLoyaltyMultiplier(int loyaltyLevel)
+    {
+	    string key = "LOYALTY_" + loyaltyLevel;
+
+	    if (loyaltyLevel >= 1 &&
+	        loyaltyLevel <= 4 &&
+	        _config is not null &&
+	        Tiers is not null &&
+	        Tiers.TryGetValue(key, out string? raw) &&
+	        double.TryParse(raw, NumberStyles.Any, CultureInfo.InvariantCulture, out double parsed))
+		    return parsed;
+
+	    return loyaltyLevel switch
+	    {
+		    1 => 1.00,
+		    2 => 1.15,
+		    3 => 1.30,
+		    4 => 1.45,
+		    _ => 1.00
+	    };
+    }
+
+    /// <summary>由 ItemInfo 在读取 config/tiers.json 之后注入，供系数解析使用。</summary>
+    public static Dictionary<string, string>? Tiers { get; set; }
+
+    /// <summary>
+    /// 单价口径：跳蚤均价优先，没有再用图鉴/手册价（GetFleaPrice 已实现该顺序）。
+    /// 两者都没有时返回 0。
+    /// </summary>
+    public static double GetUnitPrice(string itemId)
+    {
+	    double? price = GetFleaPrice(itemId);
+	    return price is not null && price > 0 ? (double)price : 0;
     }
 
     public static double? GetFleaPrice(string itemId)
@@ -572,11 +653,11 @@ public static class Utils
 	}
 
 
-    public static (List<double> price, string barters, List<int> rarityArray) BarterInfoGenerator(
+    public static (List<double> price, string barters, List<ResolvedBarter> resolvedBarters) BarterInfoGenerator(
 	    List<ResolvedBarter> itemBarters, string locale = "en")
     {
 	    StringBuilder barterString = new StringBuilder();
-	    List<int> rarityArray = [];
+	    List<ResolvedBarter> resolvedBarters = [];
 	    List<double> prices = [];
 
 	    foreach (ResolvedBarter barter in itemBarters)
@@ -604,7 +685,6 @@ public static class Utils
 								barter.BarterLoyaltyLevel +
 								" < ");
 
-		    bool isBarter = false;
 
 		    foreach (BarterScheme resource in barter.BarterResources)
 		    {
@@ -638,18 +718,13 @@ public static class Utils
 					                        " x" + 
 					                        resource.Count + 
 					                        " + ");
-					    isBarter = true;
-					    break;
+						    break;
 			    }
 		    }
 
+		    // 兑换（以物易物）与直购一视同仁：只记录忠诚等级本身，不再 +1 抬档。
 		    if (!_config.BlacklistedTradersFromRarityCalc.Contains(barter.TraderId)) // Exclude blacklisted traders from rarity calc
-		    {
-			    if (isBarter)
-				    rarityArray.Add(barter.BarterLoyaltyLevel + 1);
-			    else
-				    rarityArray.Add(barter.BarterLoyaltyLevel);
-		    }
+			    resolvedBarters.Add(barter);
 
 		    if (totalBarterPrice != 0)
 			    totalBarterPriceString = " | Σ ≈ " +  
@@ -659,7 +734,7 @@ public static class Utils
 		    barterString.Remove(barterString.Length - 3, 3).Append(totalBarterPriceString + "\n");
 	    }
 	    
-	    return (prices, barterString.ToString(), rarityArray.Count == 0 ? [0] : rarityArray);
+	    return (prices, barterString.ToString(), resolvedBarters);
     }
     
     public static string BarterResourceInfoGenerator(string itemId, string locale = "en")
