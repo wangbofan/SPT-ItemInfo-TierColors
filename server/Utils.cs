@@ -239,29 +239,77 @@ public static class Utils
     }
 
     /// <summary>
-    /// 忠诚等级系数：数值越低（越好买）系数越小，等效价值越接近原价。
-    /// 取值来自 config/tiers.json 的 LOYALTY_1..4，缺省回落到 1.00 / 1.15 / 1.30 / 1.45。
+    /// 商人货的忠诚系数（v2.3.3 起改小步进）：越晚才买得到，系数越大一点点。
+    /// 取值来自 config/tiers.json 的 LOYALTY_1..4，缺省回落到 1.00 / 1.05 / 1.10 / 1.15。
+    /// 跳蚤禁售 / 无货源的大系数见 GetAvailabilityMultiplier()。
     /// </summary>
     public static double GetLoyaltyMultiplier(int loyaltyLevel)
     {
-	    string key = "LOYALTY_" + loyaltyLevel;
+	    int level = Math.Clamp(loyaltyLevel, 1, 4);
+	    double parsed = ParseTierDouble("LOYALTY_" + level, double.NaN);
 
-	    if (loyaltyLevel >= 1 &&
-	        loyaltyLevel <= 4 &&
-	        _config is not null &&
-	        Tiers is not null &&
-	        Tiers.TryGetValue(key, out string? raw) &&
-	        double.TryParse(raw, NumberStyles.Any, CultureInfo.InvariantCulture, out double parsed))
+	    if (!double.IsNaN(parsed))
 		    return parsed;
 
-	    return loyaltyLevel switch
+	    return level switch
 	    {
 		    1 => 1.00,
-		    2 => 1.15,
-		    3 => 1.30,
-		    4 => 1.45,
-		    _ => 1.00
+		    2 => 1.05,
+		    3 => 1.10,
+		    _ => 1.15
 	    };
+    }
+
+    /// <summary>
+    /// 可得性系数（v2.3.3）：越难到手，等效价值越贵、档位越高。
+    /// 跳蚤禁售且商人无货源 → 2.60；跳蚤禁售但商人有 → 1.90；
+    /// 商人不卖但跳蚤能交易 → 1.40；正常商人货 → 按忠诚等级小步递增。
+    /// </summary>
+    public static double GetAvailabilityMultiplier(bool canSellOnFlea, int lowestLoyaltyLevel)
+    {
+	    bool banned = !canSellOnFlea;
+
+	    if (banned &&
+	        lowestLoyaltyLevel <= 0)
+		    return ParseTierDouble("AVAIL_BANNED_NO_TRADER", 2.60);
+
+	    if (banned)
+		    return ParseTierDouble("AVAIL_BANNED", 1.90);
+
+	    if (lowestLoyaltyLevel <= 0)
+		    return ParseTierDouble("AVAIL_NO_TRADER", 1.40);
+
+	    return GetLoyaltyMultiplier(lowestLoyaltyLevel);
+    }
+
+    /// <summary>
+    /// 可得性地板（v2.3.3）：买不到的东西至少给到某个档位，避免被低价手册价拖到低档。
+    /// 跳蚤禁售且商人无货源 → 至少 3 档；跳蚤禁售但商人有 → 至少 2 档。
+    /// </summary>
+    public static int GetAvailabilityFloorTier(bool canSellOnFlea, int lowestLoyaltyLevel)
+    {
+	    bool banned = !canSellOnFlea;
+
+	    if (banned &&
+	        lowestLoyaltyLevel <= 0)
+		    return (int)ParseTierDouble("FLOOR_BANNED_NO_TRADER", 3d);
+
+	    if (banned)
+		    return (int)ParseTierDouble("FLOOR_BANNED", 2d);
+
+	    return 1;
+    }
+
+    /// <summary>读 config/tiers.json 的数值项，解析失败或非正数时用 fallback。</summary>
+    private static double ParseTierDouble(string key, double fallback)
+    {
+	    if (Tiers is not null &&
+	        Tiers.TryGetValue(key, out string? raw) &&
+	        double.TryParse(raw, NumberStyles.Any, CultureInfo.InvariantCulture, out double value) &&
+	        value > 0)
+		    return value;
+
+	    return fallback;
     }
 
     /// <summary>由 ItemInfo 在读取 config/tiers.json 之后注入，供系数解析使用。</summary>
@@ -274,6 +322,17 @@ public static class Utils
     public static double GetUnitPrice(string itemId)
     {
 	    double? price = GetFleaPrice(itemId);
+	    return price is not null && price > 0 ? (double)price : 0;
+    }
+
+    /// <summary>
+    /// 档位基准价：**只用图鉴/手册价**（BSG 静态基准价）。
+    /// 不用 prices.json，因为那是跳蚤动态询价，运行时会按报价随机浮动/被抬价，档位就不稳定了。
+    /// </summary>
+    public static double GetBasePrice(string itemId)
+    {
+	    double? price = GetItemInHandbook(itemId)?.Price;
+
 	    return price is not null && price > 0 ? (double)price : 0;
     }
 

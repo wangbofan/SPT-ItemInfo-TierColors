@@ -35,7 +35,7 @@ public record ModMetadata : IModMetadata
     public string Name { get; init; } = "ItemInfo";
     public string Author { get; init; } = "ODT";
     public List<string>? Contributors { get; init; }
-    public SemanticVersioning.Version Version { get; init; } = new("2.3.2");
+    public SemanticVersioning.Version Version { get; init; } = new("2.3.3");
     public SemanticVersioning.Range SptVersion { get; init; } = new("~4.1.0");
     public bool HasPrepatcher { get; init; }
     public List<string>? Incompatibilities { get; init; }
@@ -100,7 +100,7 @@ public class ItemInfo(
 	/// <summary>
 	/// 导出表的版本号，供客户端判断是否需要刷新缓存。
 	/// </summary>
-	public static string ExportVersion { get; set; } = "2.3.2";
+	public static string ExportVersion { get; set; } = "2.3.3";
 
     public Task OnLoadAsync(CancellationToken cancellationToken)
     {
@@ -364,14 +364,128 @@ public class ItemInfo(
     }
 
 	/// <summary>
+	/// tpl -> 档位（1-5），由 ComputeAllTiers() 一次性算好。
+	/// 之所以要先全库算一遍：子弹穿透单调钳制需要同口径的所有弹种一起比较。
+	/// </summary>
+	private readonly Dictionary<string, int> ComputedTiers = new();
+
+
+	/// <summary>
+	/// 全库档位预计算：等效价值 V = 单价 × 堆叠上限 × 可得性系数，
+	/// 再由可得性地板兜底，最后按口径做子弹穿透单调钳制。
+	/// </summary>
+	private void ComputeAllTiers()
+	{
+		ComputedTiers.Clear();
+
+		foreach (KeyValuePair<MongoId, TemplateItem> kvp in Items)
+		{
+			string itemId = kvp.Key;
+			TemplateItem templateItem = kvp.Value;
+			TemplateItemProperties? itemProperties = templateItem.Properties;
+
+			if (itemProperties is null ||
+			    templateItem.Type != "Item" ||
+			    Utils.GetItemInHandbook(itemId) is null ||
+			    (itemProperties.QuestItem ?? false) ||
+			    templateItem.Parent == "543be5dd4bdc2deb348b4569") // 货币
+				continue;
+
+			int lowestLoyaltyLevel = Utils.GetLowestLoyaltyLevel(itemId);
+			double unitPrice = Utils.GetBasePrice(itemId);
+			double stackSize = Math.Max(1, itemProperties.StackMaxSize ?? 1);
+			bool canSellOnFlea = itemProperties.CanSellOnRagfair ?? true;
+
+			double equivalentValue = unitPrice *
+			                         stackSize *
+			                         Utils.GetAvailabilityMultiplier(canSellOnFlea, lowestLoyaltyLevel);
+
+			int tier = ComputeTier(equivalentValue);
+			tier = Math.Max(tier, Utils.GetAvailabilityFloorTier(canSellOnFlea, lowestLoyaltyLevel));
+
+			if (Config.ModRarityRecolor.Enabled &&
+			    Config.ModRarityRecolor.CustomRarity.TryGetValue(itemId, out int customTier))
+				tier = Math.Clamp(customTier, 1, 5); // 手工表权威，随后由穿透钳制兜底
+
+			ComputedTiers[itemId] = Math.Clamp(tier, 1, 5);
+		}
+
+		ApplyBulletPenetrationClamp();
+	}
+
+	/// <summary>
+	/// 子弹穿透单调钳制（v2.3.3）：同口径内穿透更高的子弹不该比穿透更低的档位还低。
+	/// 只降不升：把「穿透更低却档位更高」的那发压到上一发的档位。
+	/// 排除 StackMaxSize &lt; 2 的伪子弹（榴弹破片 MON-50 / 26x75 信号弹等）。
+	/// </summary>
+	private void ApplyBulletPenetrationClamp()
+	{
+		Dictionary<string, List<KeyValuePair<string, double>>> byCaliber = new();
+
+		foreach (KeyValuePair<MongoId, TemplateItem> kvp in Items)
+		{
+			string itemId = kvp.Key;
+			if (!ComputedTiers.ContainsKey(itemId))
+				continue;
+
+			TemplateItemProperties? itemProperties = kvp.Value.Properties;
+			if (itemProperties is null ||
+			    itemProperties.AmmoType != "bullet")
+				continue;
+
+			double penetration = itemProperties.PenetrationPower ?? 0;
+			double stackSize = itemProperties.StackMaxSize ?? 1;
+			string caliber = itemProperties.Caliber ?? "";
+
+			if (penetration <= 0 ||
+			    stackSize < 2 ||
+			    caliber.Length == 0)
+				continue;
+
+			if (!byCaliber.TryGetValue(caliber, out List<KeyValuePair<string, double>>? list))
+			{
+				list = new List<KeyValuePair<string, double>>();
+				byCaliber[caliber] = list;
+			}
+
+			list.Add(new KeyValuePair<string, double>(itemId, penetration));
+		}
+
+		foreach (KeyValuePair<string, List<KeyValuePair<string, double>>> caliber in byCaliber)
+		{
+			List<KeyValuePair<string, double>> list = caliber.Value;
+			list.Sort((a, b) => b.Value.CompareTo(a.Value)); // 穿透降序
+
+			int highestTier = 0;
+
+			foreach (KeyValuePair<string, double> entry in list)
+			{
+				int tier = ComputedTiers[entry.Key];
+
+				if (highestTier > 0 &&
+				    tier > highestTier)
+				{
+					ComputedTiers[entry.Key] = highestTier;
+					tier = highestTier;
+				}
+
+				// 沿着「穿透降序」往下走，档位只允许不升（tier 必须 <= 上一发）。
+				// 这里必须取当前这发的档位作为新的上限，而不是取最大值 —— 否则
+				// 一旦有一发被抬得很高（如 customRarity），后面的倒挂就再也压不住了。
+				highestTier = tier;
+			}
+		}
+	}
+
+	/// <summary>
 	/// 把等效价值换算成 1-5 档。阈值来自 tiers.json 的 TIER_1_MAX..TIER_4_MAX。
 	/// </summary>
 	private int ComputeTier(double equivalentValue)
 	{
-		double t1 = ParseThreshold("TIER_1_MAX", 10000d);
-		double t2 = ParseThreshold("TIER_2_MAX", 35000d);
-		double t3 = ParseThreshold("TIER_3_MAX", 100000d);
-		double t4 = ParseThreshold("TIER_4_MAX", 300000d);
+		double t1 = ParseThreshold("TIER_1_MAX", 3000d);
+		double t2 = ParseThreshold("TIER_2_MAX", 12000d);
+		double t3 = ParseThreshold("TIER_3_MAX", 48000d);
+		double t4 = ParseThreshold("TIER_4_MAX", 192000d);
 
 		if (equivalentValue <= t1)
 			return 1;
@@ -419,6 +533,7 @@ public class ItemInfo(
 	    StringBuilder addToShortName = new StringBuilder();
 	    // 导出给客户端 mod 的 tpl -> 档位 表（客户端拿不到跳蚤价，只能服务端下发）
 	    ExportTiers.Clear();
+	    ComputeAllTiers();
 	    
 	    foreach (KeyValuePair<MongoId, TemplateItem> kvp in Items)
 	    {
@@ -504,13 +619,8 @@ public class ItemInfo(
 			    }
 		    }
 
-		    int lowestLoyaltyLevel = Utils.GetLowestLoyaltyLevel(itemId);
-		    double unitPrice = Utils.GetUnitPrice(itemId);
-		    double stackSize = Math.Max(1, itemProperties.StackMaxSize ?? 1);
-		    double totalValue = unitPrice * stackSize;
-		    double equivalentValue = totalValue * Utils.GetLoyaltyMultiplier(lowestLoyaltyLevel);
-
-		    itemRarity = ComputeTier(equivalentValue);
+		    // 档位在 ComputeAllTiers() 里统一算好（含可得性系数、地板与子弹穿透单调钳制）
+		    itemRarity = ComputedTiers.TryGetValue(itemId, out int precomputedTier) ? precomputedTier : 1;
 
 		    // BulletStatsInName
 		    if (Config.ModBulletStatsInName.Enabled)
@@ -805,12 +915,6 @@ public class ItemInfo(
 			         (templateItem.Parent != BaseClasses.KEY_MECHANICAL &&
 			          templateItem.Parent != BaseClasses.KEYCARD)))
 			    {
-				    foreach (KeyValuePair<string, int> customItem in Config.ModRarityRecolor.CustomRarity)
-				    {
-					    if (customItem.Key == itemId)
-						    itemRarity = Math.Clamp(customItem.Value, 1, 5); // 手工表统一收敛到 1-5
-				    }
-
 				    string tier = TierKeyOf(itemRarity);
 
 				    itemProperties.BackgroundColor = RarityColors.Background(Tiers, TiersHex, tier);
@@ -911,7 +1015,7 @@ public class ItemInfo(
 /// </summary>
 public class TierExportResponse
 {
-    public string Version { get; set; } = "2.3.2";
+    public string Version { get; set; } = "2.3.3";
     public string GeneratedAt { get; set; } = "";
     public Dictionary<string, string> Names { get; set; } = new();
     public Dictionary<string, string> Colors { get; set; } = new();

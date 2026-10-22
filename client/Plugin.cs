@@ -34,7 +34,7 @@ namespace OdtTierColors
     {
         public const string Guid = "justnu.odt.tiercolors";
         public const string PluginName = "SPT-ItemInfo-TierColors";
-        public const string PluginVersion = "2.3.2";
+        public const string PluginVersion = "2.3.3";
 
         /// <summary>服务端 ItemInfo 的静态路由，返回 {version, names, colors, tiers}。</summary>
         internal const string TierRoute = "/iteminfo/tiers";
@@ -176,7 +176,7 @@ namespace OdtTierColors
             {
                 harmony.PatchAll(typeof(TierColorPlugin).Assembly);
                 AutoExamine.Patch(harmony);
-                LogSource.LogInfo("[ODT-TierColors] 2.3.2 已挂接：格子背景按 1-5 档实例级着色（透明度五档统一）。");
+                LogSource.LogInfo("[ODT-TierColors] 2.3.3 已挂接：格子背景按 1-5 档实例级着色（透明度五档统一）。");
             }
             catch (Exception ex)
             {
